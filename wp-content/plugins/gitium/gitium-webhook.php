@@ -26,6 +26,11 @@ require_once __DIR__ . '/inc/class-git-wrapper.php';
 
 $webhook_key = get_option( 'gitium_webhook_key', '' );
 $get_key = filter_input(INPUT_GET, 'key', FILTER_SANITIZE_STRING);
+
+if(isset($get_key)){
+	var_export($get_key);
+}
+
 if ( ! empty ( $webhook_key ) && isset( $get_key ) && $webhook_key == $get_key ) :
 	( '1.7' <= substr( $git->get_version(), 0, 3 ) ) or wp_die( 'Gitium plugin require minimum `git version 1.7`!' );
 
