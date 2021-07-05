@@ -10,10 +10,10 @@ if ( 'development' === getenv('WP_ENV') ) {
 }
 
 
-if ( 'production' === getenv('WP_ENV') ) {
+//if ( 'production' === getenv('WP_ENV') ) {
 	define( 'DISALLOW_FILE_EDIT', false );
 	define( 'DISALLOW_FILE_MODS', false );
 
 	define( 'WP_DEBUG', false );
 	define( 'SAVEQUERIES', false );
-}
+//}
