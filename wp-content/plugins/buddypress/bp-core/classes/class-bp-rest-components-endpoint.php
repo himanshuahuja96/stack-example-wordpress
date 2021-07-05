@@ -50,18 +50,12 @@ class BP_REST_Components_Endpoint extends WP_REST_Controller {
 							'type'        => 'string',
 							'required'    => true,
 							'description' => __( 'Name of the component.', 'buddypress' ),
-							'arg_options' => array(
-								'sanitize_callback' => 'sanitize_key',
-							),
 						),
 						'action' => array(
 							'description' => __( 'Whether to activate or deactivate the component.', 'buddypress' ),
 							'type'        => 'string',
 							'enum'        => array( 'activate', 'deactivate' ),
 							'required'    => true,
-							'arg_options' => array(
-								'sanitize_callback' => 'sanitize_key',
-							),
 						),
 					),
 				),
@@ -162,19 +156,19 @@ class BP_REST_Components_Endpoint extends WP_REST_Controller {
 	 * @since 5.0.0
 	 *
 	 * @param WP_REST_Request $request Full data about the request.
-	 * @return bool|WP_Error
+	 * @return true|WP_Error
 	 */
 	public function get_items_permissions_check( $request ) {
-		$retval = true;
+		$retval = new WP_Error(
+			'bp_rest_authorization_required',
+			__( 'Sorry, you are not allowed to perform this action.', 'buddypress' ),
+			array(
+				'status' => rest_authorization_required_code(),
+			)
+		);
 
-		if ( ! ( is_user_logged_in() && bp_current_user_can( 'bp_moderate' ) ) ) {
-			$retval = new WP_Error(
-				'bp_rest_authorization_required',
-				__( 'Sorry, you do not have access to list components.', 'buddypress' ),
-				array(
-					'status' => rest_authorization_required_code(),
-				)
-			);
+		if ( bp_current_user_can( 'manage_options' ) ) {
+			$retval = true;
 		}
 
 		/**
@@ -182,7 +176,7 @@ class BP_REST_Components_Endpoint extends WP_REST_Controller {
 		 *
 		 * @since 5.0.0
 		 *
-		 * @param bool|WP_Error   $retval  Returned value.
+		 * @param true|WP_Error   $retval  Returned value.
 		 * @param WP_REST_Request $request The request sent to the API.
 		 */
 		return apply_filters( 'bp_rest_components_get_items_permissions_check', $retval, $request );
@@ -204,29 +198,18 @@ class BP_REST_Components_Endpoint extends WP_REST_Controller {
 				'bp_rest_component_nonexistent',
 				__( 'Sorry, this component does not exist.', 'buddypress' ),
 				array(
-					'status' => 500,
+					'status' => 404,
 				)
 			);
 		}
 
-		$action = $request['action'];
-		if ( empty( $action ) || ! in_array( $action, [ 'activate', 'deactivate' ], true ) ) {
-			return new WP_Error(
-				'bp_rest_component_invalid_action',
-				__( 'Sorry, this is not a valid action.', 'buddypress' ),
-				array(
-					'status' => 500,
-				)
-			);
-		}
-
-		if ( 'activate' === $action ) {
+		if ( 'activate' === $request['action'] ) {
 			if ( bp_is_active( $component ) ) {
 				return new WP_Error(
 					'bp_rest_component_already_active',
 					__( 'Sorry, this component is already active.', 'buddypress' ),
 					array(
-						'status' => 500,
+						'status' => 400,
 					)
 				);
 			}
@@ -238,7 +221,7 @@ class BP_REST_Components_Endpoint extends WP_REST_Controller {
 					'bp_rest_component_inactive',
 					__( 'Sorry, this component is not active.', 'buddypress' ),
 					array(
-						'status' => 500,
+						'status' => 400,
 					)
 				);
 			}
@@ -248,15 +231,13 @@ class BP_REST_Components_Endpoint extends WP_REST_Controller {
 					'bp_rest_required_component',
 					__( 'Sorry, you cannot deactivate a required component.', 'buddypress' ),
 					array(
-						'status' => 500,
+						'status' => 400,
 					)
 				);
 			}
 
 			$component_info = $this->deactivate_helper( $component );
 		}
-
-		$request->set_param( 'context', 'edit' );
 
 		$retval = array(
 			$this->prepare_response_for_collection(
@@ -286,7 +267,7 @@ class BP_REST_Components_Endpoint extends WP_REST_Controller {
 	 * @since 5.0.0
 	 *
 	 * @param  WP_REST_Request $request Full details about the request.
-	 * @return bool|WP_Error
+	 * @return true|WP_Error
 	 */
 	public function update_item_permissions_check( $request ) {
 		$retval = $this->get_items_permissions_check( $request );
@@ -296,7 +277,7 @@ class BP_REST_Components_Endpoint extends WP_REST_Controller {
 		 *
 		 * @since 5.0.0
 		 *
-		 * @param bool|WP_Error   $retval  Returned value.
+		 * @param true|WP_Error   $retval  Returned value.
 		 * @param WP_REST_Request $request The request sent to the API.
 		 */
 		return apply_filters( 'bp_rest_components_update_item_permissions_check', $retval, $request );
@@ -312,11 +293,9 @@ class BP_REST_Components_Endpoint extends WP_REST_Controller {
 	 * @return WP_REST_Response
 	 */
 	public function prepare_item_for_response( $component, $request ) {
-		$context = ! empty( $request['context'] ) ? $request['context'] : 'view';
-		$data    = $this->add_additional_fields_to_object( $component, $request );
-		$data    = $this->filter_response_by_context( $data, $context );
-
-		// @todo add prepare_links
+		$context  = ! empty( $request['context'] ) ? $request['context'] : 'view';
+		$data     = $this->add_additional_fields_to_object( $component, $request );
+		$data     = $this->filter_response_by_context( $data, $context );
 		$response = rest_ensure_response( $data );
 
 		/**
@@ -449,53 +428,43 @@ class BP_REST_Components_Endpoint extends WP_REST_Controller {
 	 * @return array
 	 */
 	public function get_item_schema() {
-		$schema = array(
-			'$schema'    => 'http://json-schema.org/draft-04/schema#',
-			'title'      => 'bp_components',
-			'type'       => 'object',
-			'properties' => array(
-				'name'        => array(
-					'context'     => array( 'view', 'edit' ),
-					'description' => __( 'Name of the object.', 'buddypress' ),
-					'type'        => 'string',
-					'arg_options' => array(
-						'sanitize_callback' => 'sanitize_key',
+		if ( is_null( $this->schema ) ) {
+			$this->schema = array(
+				'$schema'    => 'http://json-schema.org/draft-04/schema#',
+				'title'      => 'bp_components',
+				'type'       => 'object',
+				'properties' => array(
+					'name'        => array(
+						'context'     => array( 'view', 'edit' ),
+						'description' => __( 'Name of the object.', 'buddypress' ),
+						'type'        => 'string',
+					),
+					'status'      => array(
+						'context'     => array( 'view', 'edit' ),
+						'description' => __( 'Whether the object is active or inactive.', 'buddypress' ),
+						'type'        => 'string',
+						'enum'        => array( 'active', 'inactive' ),
+					),
+					'title'       => array(
+						'context'     => array( 'view', 'edit' ),
+						'description' => __( 'HTML title of the object.', 'buddypress' ),
+						'type'        => 'string',
+					),
+					'description' => array(
+						'context'     => array( 'view', 'edit' ),
+						'description' => __( 'HTML description of the object.', 'buddypress' ),
+						'type'        => 'string',
 					),
 				),
-				'status'      => array(
-					'context'     => array( 'view', 'edit' ),
-					'description' => __( 'Whether the object is active or inactive.', 'buddypress' ),
-					'type'        => 'string',
-					'enum'        => array( 'active', 'inactive' ),
-					'arg_options' => array(
-						'sanitize_callback' => 'sanitize_key',
-					),
-				),
-				'title'       => array(
-					'context'     => array( 'view', 'edit' ),
-					'description' => __( 'HTML title of the object.', 'buddypress' ),
-					'type'        => 'string',
-					'arg_options' => array(
-						'sanitize_callback' => 'sanitize_text_field',
-					),
-				),
-				'description' => array(
-					'context'     => array( 'view', 'edit' ),
-					'description' => __( 'HTML description of the object.', 'buddypress' ),
-					'type'        => 'string',
-					'arg_options' => array(
-						'sanitize_callback' => 'sanitize_text_field',
-					),
-				),
-			),
-		);
+			);
+		}
 
 		/**
 		 * Filters the components schema.
 		 *
-		 * @param string $schema The endpoint schema.
+		 * @param array $schema The endpoint schema.
 		 */
-		return apply_filters( 'bp_rest_components_schema', $this->add_additional_fields_schema( $schema ) );
+		return apply_filters( 'bp_rest_components_schema', $this->add_additional_fields_schema( $this->schema ) );
 	}
 
 	/**

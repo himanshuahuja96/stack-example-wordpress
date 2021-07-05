@@ -66,10 +66,18 @@ class BP_REST_Groups_Endpoint extends WP_REST_Controller {
 					'callback'            => array( $this, 'get_item' ),
 					'permission_callback' => array( $this, 'get_item_permissions_check' ),
 					'args'                => array(
-						'context' => $this->get_context_param(
+						'context'         => $this->get_context_param(
 							array(
 								'default' => 'view',
 							)
+						),
+						'populate_extras' => array(
+							'description'       => __( 'Whether to fetch extra BP data about the returned group.', 'buddypress' ),
+							'context'           => array( 'view', 'edit' ),
+							'default'           => false,
+							'type'              => 'boolean',
+							'sanitize_callback' => 'rest_sanitize_boolean',
+							'validate_callback' => 'rest_validate_request_arg',
 						),
 					),
 				),
@@ -83,6 +91,29 @@ class BP_REST_Groups_Endpoint extends WP_REST_Controller {
 					'methods'             => WP_REST_Server::DELETABLE,
 					'callback'            => array( $this, 'delete_item' ),
 					'permission_callback' => array( $this, 'delete_item_permissions_check' ),
+				),
+				'schema' => array( $this, 'get_item_schema' ),
+			)
+		);
+
+		register_rest_route(
+			$this->namespace,
+			'/' . $this->rest_base . '/me',
+			array(
+				'args'   => array(
+					'max' => array(
+						'description' => __( 'The maximum amount of groups the user is member of to return. Defaults to all groups.', 'buddypress' ),
+						'type'        => 'integer',
+						'default'     => 0,
+					),
+				),
+				array(
+					'methods'             => WP_REST_Server::READABLE,
+					'callback'            => array( $this, 'get_current_user_groups' ),
+					'permission_callback' => array( $this, 'get_current_user_groups_permissions_check' ),
+					'args'                => array(
+						'context' => $this->get_context_param( array( 'default' => 'view' ) ),
+					),
 				),
 				'schema' => array( $this, 'get_item_schema' ),
 			)
@@ -118,6 +149,15 @@ class BP_REST_Groups_Endpoint extends WP_REST_Controller {
 
 		if ( empty( $request['parent_id'] ) ) {
 			$args['parent_id'] = null;
+		}
+
+		// See if the user can see hidden groups.
+		if ( isset( $request['show_hidden'] ) && true === (bool) $request['show_hidden'] && ! $this->can_see_hidden_groups( $request ) ) {
+			$args['show_hidden'] = false;
+		}
+
+		if ( true === $request->get_param( 'populate_extras' ) ) {
+			$args['update_meta_cache'] = true;
 		}
 
 		/**
@@ -168,30 +208,19 @@ class BP_REST_Groups_Endpoint extends WP_REST_Controller {
 	 * @since 5.0.0
 	 *
 	 * @param WP_REST_Request $request Full details about the request.
-	 * @return bool|WP_Error
+	 * @return true|WP_Error
 	 */
 	public function get_items_permissions_check( $request ) {
-		$retval = true;
-
-		if ( ! $this->can_see_hidden_groups( $request ) ) {
-			$retval = new WP_Error(
-				'bp_rest_authorization_required',
-				__( 'Sorry, you cannot view hidden groups.', 'buddypress' ),
-				array(
-					'status' => rest_authorization_required_code(),
-				)
-			);
-		}
 
 		/**
 		 * Filter the groups `get_items` permissions check.
 		 *
 		 * @since 5.0.0
 		 *
-		 * @param bool|WP_Error   $retval  Returned value.
+		 * @param true $value True.
 		 * @param WP_REST_Request $request The request sent to the API.
 		 */
-		return apply_filters( 'bp_rest_groups_get_items_permissions_check', $retval, $request );
+		return apply_filters( 'bp_rest_groups_get_items_permissions_check', true, $request );
 	}
 
 	/**
@@ -233,10 +262,16 @@ class BP_REST_Groups_Endpoint extends WP_REST_Controller {
 	 * @since 5.0.0
 	 *
 	 * @param WP_REST_Request $request Full details about the request.
-	 * @return WP_Error|bool
+	 * @return true|WP_Error
 	 */
 	public function get_item_permissions_check( $request ) {
-		$retval = true;
+		$retval = new WP_Error(
+			'bp_rest_authorization_required',
+			__( 'Sorry, you cannot view the group.', 'buddypress' ),
+			array(
+				'status' => rest_authorization_required_code(),
+			)
+		);
 		$group  = $this->get_group_object( $request );
 
 		if ( empty( $group->id ) ) {
@@ -247,16 +282,8 @@ class BP_REST_Groups_Endpoint extends WP_REST_Controller {
 					'status' => 404,
 				)
 			);
-		}
-
-		if ( true === $retval && ! $this->can_see( $group ) ) {
-			$retval = new WP_Error(
-				'bp_rest_authorization_required',
-				__( 'Sorry, you cannot view the group.', 'buddypress' ),
-				array(
-					'status' => rest_authorization_required_code(),
-				)
-			);
+		} elseif ( $this->can_see( $group ) ) {
+			$retval = true;
 		}
 
 		/**
@@ -264,7 +291,7 @@ class BP_REST_Groups_Endpoint extends WP_REST_Controller {
 		 *
 		 * @since 5.0.0
 		 *
-		 * @param bool|WP_Error   $retval  Returned value.
+		 * @param true|WP_Error   $retval  Returned value.
 		 * @param WP_REST_Request $request The request sent to the API.
 		 */
 		return apply_filters( 'bp_rest_groups_get_item_permissions_check', $retval, $request );
@@ -289,7 +316,7 @@ class BP_REST_Groups_Endpoint extends WP_REST_Controller {
 				'bp_rest_create_group_empty_name',
 				__( 'Please, enter the name of group.', 'buddypress' ),
 				array(
-					'status' => 500,
+					'status' => 400,
 				)
 			);
 		}
@@ -311,6 +338,11 @@ class BP_REST_Groups_Endpoint extends WP_REST_Controller {
 
 		if ( is_wp_error( $fields_update ) ) {
 			return $fields_update;
+		}
+
+		// Set group type(s).
+		if ( ! empty( $request['types'] ) ) {
+			bp_groups_set_group_type( $group_id, $request['types'] );
 		}
 
 		$retval = array(
@@ -341,19 +373,22 @@ class BP_REST_Groups_Endpoint extends WP_REST_Controller {
 	 * @since 5.0.0
 	 *
 	 * @param WP_REST_Request $request Full details about the request.
-	 * @return bool|WP_Error
+	 * @return true|WP_Error
 	 */
 	public function create_item_permissions_check( $request ) {
-		$retval = true;
+		$retval = new WP_Error(
+			'bp_rest_authorization_required',
+			__( 'Sorry, you are not allowed to create groups.', 'buddypress' ),
+			array(
+				'status' => rest_authorization_required_code(),
+			)
+		);
 
-		if ( ! ( is_user_logged_in() && bp_user_can_create_groups() ) ) {
-			$retval = new WP_Error(
-				'bp_rest_authorization_required',
-				__( 'Sorry, you are not allowed to create groups.', 'buddypress' ),
-				array(
-					'status' => rest_authorization_required_code(),
-				)
-			);
+		$current_user_id = (int) bp_loggedin_user_id();
+		$creator_id      = (int) $request->get_param( 'creator_id' );
+
+		if ( ( $current_user_id && $current_user_id === $creator_id && bp_user_can_create_groups() ) || bp_current_user_can( 'bp_moderate' ) ) {
+			$retval = true;
 		}
 
 		/**
@@ -361,7 +396,7 @@ class BP_REST_Groups_Endpoint extends WP_REST_Controller {
 		 *
 		 * @since 5.0.0
 		 *
-		 * @param bool|WP_Error   $retval  Returned value.
+		 * @param true|WP_Error   $retval  Returned value.
 		 * @param WP_REST_Request $request The request sent to the API.
 		 */
 		return apply_filters( 'bp_rest_groups_create_item_permissions_check', $retval, $request );
@@ -426,24 +461,19 @@ class BP_REST_Groups_Endpoint extends WP_REST_Controller {
 	 * @since 5.0.0
 	 *
 	 * @param  WP_REST_Request $request Full details about the request.
-	 * @return bool|WP_Error
+	 * @return true|WP_Error
 	 */
 	public function update_item_permissions_check( $request ) {
-		$retval = true;
+		$retval = new WP_Error(
+			'bp_rest_authorization_required',
+			__( 'Sorry, you are not allowed to update this group.', 'buddypress' ),
+			array(
+				'status' => rest_authorization_required_code(),
+			)
+		);
+		$group  = $this->get_group_object( $request );
 
-		if ( ! is_user_logged_in() ) {
-			$retval = new WP_Error(
-				'bp_rest_authorization_required',
-				__( 'Sorry, you need to be logged in to update this group.', 'buddypress' ),
-				array(
-					'status' => rest_authorization_required_code(),
-				)
-			);
-		}
-
-		$group = $this->get_group_object( $request );
-
-		if ( true === $retval && empty( $group->id ) ) {
+		if ( empty( $group->id ) ) {
 			$retval = new WP_Error(
 				'bp_rest_group_invalid_id',
 				__( 'Invalid group ID.', 'buddypress' ),
@@ -451,17 +481,16 @@ class BP_REST_Groups_Endpoint extends WP_REST_Controller {
 					'status' => 404,
 				)
 			);
-		}
-
-		// If group author does not match logged_in user, block update.
-		if ( true === $retval && ! $this->can_user_delete_or_update( $group ) ) {
+		} elseif ( ! is_user_logged_in() ) {
 			$retval = new WP_Error(
 				'bp_rest_authorization_required',
-				__( 'Sorry, you are not allowed to update this group.', 'buddypress' ),
+				__( 'Sorry, you need to be logged in to update this group.', 'buddypress' ),
 				array(
 					'status' => rest_authorization_required_code(),
 				)
 			);
+		} elseif ( $this->can_user_delete_or_update( $group ) ) {
+			$retval = true;
 		}
 
 		/**
@@ -469,7 +498,7 @@ class BP_REST_Groups_Endpoint extends WP_REST_Controller {
 		 *
 		 * @since 5.0.0
 		 *
-		 * @param bool|WP_Error   $retval  Returned value.
+		 * @param true|WP_Error   $retval  Returned value.
 		 * @param WP_REST_Request $request The request sent to the API.
 		 */
 		return apply_filters( 'bp_rest_groups_update_item_permissions_check', $retval, $request );
@@ -530,24 +559,19 @@ class BP_REST_Groups_Endpoint extends WP_REST_Controller {
 	 * @since 5.0.0
 	 *
 	 * @param  WP_REST_Request $request Full details about the request.
-	 * @return bool|WP_Error
+	 * @return true|WP_Error
 	 */
 	public function delete_item_permissions_check( $request ) {
-		$retval = true;
+		$retval = new WP_Error(
+			'bp_rest_authorization_required',
+			__( 'Sorry, you are not allowed to delete this group.', 'buddypress' ),
+			array(
+				'status' => rest_authorization_required_code(),
+			)
+		);
+		$group  = $this->get_group_object( $request );
 
-		if ( ! is_user_logged_in() ) {
-			$retval = new WP_Error(
-				'bp_rest_authorization_required',
-				__( 'Sorry, you need to be logged in to delete this group.', 'buddypress' ),
-				array(
-					'status' => rest_authorization_required_code(),
-				)
-			);
-		}
-
-		$group = $this->get_group_object( $request );
-
-		if ( true === $retval && empty( $group->id ) ) {
+		if ( empty( $group->id ) ) {
 			$retval = new WP_Error(
 				'bp_rest_group_invalid_id',
 				__( 'Invalid group ID.', 'buddypress' ),
@@ -555,16 +579,16 @@ class BP_REST_Groups_Endpoint extends WP_REST_Controller {
 					'status' => 404,
 				)
 			);
-		}
-
-		if ( true === $retval && ! $this->can_user_delete_or_update( $group ) ) {
+		} elseif ( ! is_user_logged_in() ) {
 			$retval = new WP_Error(
 				'bp_rest_authorization_required',
-				__( 'Sorry, you are not allowed to delete this group.', 'buddypress' ),
+				__( 'Sorry, you need to be logged in to delete this group.', 'buddypress' ),
 				array(
 					'status' => rest_authorization_required_code(),
 				)
 			);
+		} elseif ( $this->can_user_delete_or_update( $group ) ) {
+			$retval = true;
 		}
 
 		/**
@@ -572,10 +596,116 @@ class BP_REST_Groups_Endpoint extends WP_REST_Controller {
 		 *
 		 * @since 5.0.0
 		 *
-		 * @param bool|WP_Error   $retval  Returned value.
+		 * @param true|WP_Error   $retval  Returned value.
 		 * @param WP_REST_Request $request The request sent to the API.
 		 */
 		return apply_filters( 'bp_rest_groups_delete_item_permissions_check', $retval, $request );
+	}
+
+	/**
+	 * Retrieves the current user groups.
+	 *
+	 * @since 7.0.0
+	 *
+	 * @param WP_REST_Request $request Full details about the request.
+	 * @return WP_REST_Response|WP_Error Response object on success, or WP_Error object on failure.
+	 */
+	public function get_current_user_groups( $request ) {
+		$current_user_id = get_current_user_id();
+		$max             = $request->get_param( 'max' );
+
+		if ( empty( $current_user_id ) ) {
+			return new WP_Error(
+				'bp_rest_group_invalid_user_id',
+				__( 'Invalid user ID.', 'buddypress' ),
+				array(
+					'status' => 404,
+				)
+			);
+		}
+
+		$per_page = -1;
+		if ( $max ) {
+			$per_page = (int) $max;
+		}
+
+		/**
+		 * Filter the query arguments for the request.
+		 *
+		 * @since 7.0.0
+		 *
+		 * @param array           $args    Key value array of query var to query value.
+		 * @param WP_REST_Request $request The request sent to the API.
+		 */
+		$args = apply_filters(
+			'bp_rest_groups_get_current_user_groups_query_args',
+			array(
+				'user_id'            => $current_user_id,
+				'per_page'           => $per_page,
+				'page'               => 1,
+				'show_hidden'        => true,
+				'update_admin_cache' => false,
+				'update_meta_cache'  => false,
+			),
+			$request
+		);
+
+		// Actually, query it.
+		$groups = groups_get_groups( $args );
+
+		$retval = array();
+		foreach ( $groups['groups'] as $group ) {
+			$retval[] = $this->prepare_response_for_collection(
+				$this->prepare_item_for_response( $group, $request )
+			);
+		}
+
+		$response = rest_ensure_response( $retval );
+
+		/**
+		 * Fires after the user's list of groups is fetched via the REST API.
+		 *
+		 * @since 7.0.0
+		 *
+		 * @param array            $groups   Fetched groups.
+		 * @param WP_REST_Response $response The response data.
+		 * @param WP_REST_Request  $request  The request sent to the API.
+		 */
+		do_action( 'bp_rest_groups_get_current_user_groups', $groups, $response, $request );
+
+		return $response;
+	}
+
+	/**
+	 * Check if a given request has access to fetch the user's groups.
+	 *
+	 * @since 7.0.0
+	 *
+	 * @param  WP_REST_Request $request Full details about the request.
+	 * @return true|WP_Error
+	 */
+	public function get_current_user_groups_permissions_check( $request ) {
+		$retval = new WP_Error(
+			'bp_rest_authorization_required',
+			__( 'Sorry, you need to be logged in to view your groups.', 'buddypress' ),
+			array(
+				'status' => rest_authorization_required_code(),
+			)
+		);
+
+		if ( is_user_logged_in() ) {
+			$retval = true;
+		}
+
+		/**
+		 * Filter the groups `get_current_user_groups` permissions check.
+		 *
+		 * @since 7.0.0
+		 *
+		 * @param true|WP_Error   $retval  Returned value.
+		 * @param WP_REST_Request $request The request sent to the API.
+		 */
+		return apply_filters( 'bp_rest_groups_get_current_user_groups_permissions_check', $retval, $request );
 	}
 
 	/**
@@ -602,26 +732,17 @@ class BP_REST_Groups_Endpoint extends WP_REST_Controller {
 			'name'               => bp_get_group_name( $item ),
 			'slug'               => bp_get_group_slug( $item ),
 			'status'             => bp_get_group_status( $item ),
+			'types'              => bp_groups_get_group_type( $item->id, false ),
 			'admins'             => array(),
 			'mods'               => array(),
 			'total_member_count' => null,
 			'last_activity'      => null,
+			'last_activity_diff' => null,
 		);
 
-		// Get item schema.
-		$schema = $this->get_item_schema();
-
-		// Avatars.
-		if ( ! empty( $schema['properties']['avatar_urls'] ) ) {
+		// Return avatars, if allowed.
+		if ( true !== bp_disable_group_avatar_uploads() ) {
 			$data['avatar_urls'] = array(
-				'thumb' => bp_core_fetch_avatar(
-					array(
-						'html'    => false,
-						'object'  => 'group',
-						'item_id' => $item->id,
-						'type'    => 'thumb',
-					)
-				),
 				'full'  => bp_core_fetch_avatar(
 					array(
 						'html'    => false,
@@ -630,16 +751,33 @@ class BP_REST_Groups_Endpoint extends WP_REST_Controller {
 						'type'    => 'full',
 					)
 				),
+				'thumb' => bp_core_fetch_avatar(
+					array(
+						'html'    => false,
+						'object'  => 'group',
+						'item_id' => $item->id,
+						'type'    => 'thumb',
+					)
+				),
 			);
+		}
+
+		// Get group type(s).
+		if ( false === $data['types'] ) {
+			$data['types'] = array();
 		}
 
 		$context = ! empty( $request['context'] ) ? $request['context'] : 'view';
 
-		// If this is the 'edit' context, fill in more details--similar to "populate_extras".
-		if ( 'edit' === $context ) {
-			$data['total_member_count'] = groups_get_groupmeta( $item->id, 'total_member_count' );
-			$data['last_activity']      = bp_rest_prepare_date_response( groups_get_groupmeta( $item->id, 'last_activity' ) );
+		// If this is the 'edit' context or 'populate_extras' has been requested.
+		if ( 'edit' === $context || true === $request->get_param( 'populate_extras' ) ) {
+			$data['total_member_count'] = (int) $item->total_member_count;
+			$data['last_activity']      = bp_rest_prepare_date_response( $item->last_activity );
+			$data['last_activity_diff'] = bp_get_group_last_active( $item );
+		}
 
+		// If this is the 'edit' context, get more data about the group.
+		if ( 'edit' === $context ) {
 			// Add admins and moderators to their respective arrays.
 			$admin_mods = groups_get_group_members(
 				array(
@@ -698,25 +836,26 @@ class BP_REST_Groups_Endpoint extends WP_REST_Controller {
 	 * @since 5.0.0
 	 *
 	 * @param WP_REST_Request $request Request object.
-	 * @return stdClass|WP_Error Object or WP_Error.
+	 * @return stdClass|WP_Error
 	 */
 	protected function prepare_item_for_database( $request ) {
-		$prepared_group = new stdClass();
-		$schema         = $this->get_item_schema();
-		$group          = $this->get_group_object( $request );
+		$schema = $this->get_item_schema();
+		$group  = $this->get_group_object( $request );
+
+		if ( isset( $group->id ) && $group->id ) {
+			$prepared_group = $group;
+		} else {
+			$prepared_group = new stdClass();
+		}
 
 		// Group ID.
-		if ( ! empty( $schema['properties']['id'] ) && ! empty( $group->id ) ) {
+		if ( ! empty( $group->id ) ) {
 			$prepared_group->group_id = $group->id;
 		}
 
 		// Group Creator ID.
 		if ( ! empty( $schema['properties']['creator_id'] ) && isset( $request['creator_id'] ) ) {
 			$prepared_group->creator_id = (int) $request['creator_id'];
-
-			// Fallback on the existing creator id in case of an update.
-		} elseif ( isset( $group->creator_id ) && $group->creator_id ) {
-			$prepared_group->creator_id = (int) $group->creator_id;
 
 			// Fallback on the current user otherwise.
 		} else {
@@ -768,6 +907,26 @@ class BP_REST_Groups_Endpoint extends WP_REST_Controller {
 			$prepared_group->parent_id = $request['parent_id'];
 		}
 
+		// Update group type(s).
+		if ( isset( $prepared_group->group_id ) && isset( $request['types'] ) ) {
+			bp_groups_set_group_type( $prepared_group->group_id, $request['types'], false );
+		}
+
+		// Remove group type(s).
+		if ( isset( $prepared_group->group_id ) && isset( $request['remove_types'] ) ) {
+			array_map(
+				function( $type ) use ( $prepared_group ) {
+					bp_groups_remove_group_type( $prepared_group->group_id, $type );
+				},
+				$request['remove_types']
+			);
+		}
+
+		// Append group type(s).
+		if ( isset( $prepared_group->group_id ) && isset( $request['append_types'] ) ) {
+			bp_groups_set_group_type( $prepared_group->group_id, $request['append_types'], true );
+		}
+
 		/**
 		 * Filters a group before it is inserted or updated via the REST API.
 		 *
@@ -798,11 +957,19 @@ class BP_REST_Groups_Endpoint extends WP_REST_Controller {
 			'collection' => array(
 				'href' => rest_url( $base ),
 			),
-			'user'       => array(
+			'user'    => array(
 				'href'       => rest_url( bp_rest_get_user_url( $group->creator_id ) ),
 				'embeddable' => true,
 			),
 		);
+
+		// Embed parent group if available.
+		if ( ! empty( $group->parent ) ) {
+			$links['parent'] = array(
+				'href'       => rest_url( $base . $group->parent ),
+				'embeddable' => true,
+			);
+		}
 
 		/**
 		 * Filter links prepared for the REST response.
@@ -816,6 +983,18 @@ class BP_REST_Groups_Endpoint extends WP_REST_Controller {
 	}
 
 	/**
+	 * See if user can delete or update a group.
+	 *
+	 * @since 5.0.0
+	 *
+	 * @param  BP_Groups_Group $group Group item.
+	 * @return bool
+	 */
+	protected function can_user_delete_or_update( $group ) {
+		return ( bp_current_user_can( 'bp_moderate' ) || groups_is_user_admin( bp_loggedin_user_id(), $group->id ) );
+	}
+
+	/**
 	 * Can a user see a group?
 	 *
 	 * @since 5.0.0
@@ -825,34 +1004,13 @@ class BP_REST_Groups_Endpoint extends WP_REST_Controller {
 	 */
 	protected function can_see( $group ) {
 
-		// If it is not a hidden/private group, user can see it.
-		if ( 'public' === $group->status ) {
+		// If it is not a hidden group, user can see it.
+		if ( 'hidden' !== $group->status ) {
 			return true;
 		}
 
-		// Moderators.
-		if ( bp_current_user_can( 'bp_moderate' ) ) {
-			return true;
-		}
-
-		// User is a member of the group.
-		if ( groups_is_user_member( bp_loggedin_user_id(), $group->id ) ) {
-			return true;
-		}
-
-		return false;
-	}
-
-	/**
-	 * See if user can delete or update a group.
-	 *
-	 * @since 5.0.0
-	 *
-	 * @param  BP_Groups_Group $group Group item.
-	 * @return bool
-	 */
-	protected function can_user_delete_or_update( $group ) {
-		return ( bp_current_user_can( 'bp_moderate' ) || bp_loggedin_user_id() === $group->creator_id );
+		// Check for moderators or if user is a member of the group.
+		return ( bp_current_user_can( 'bp_moderate' ) || groups_is_user_member( bp_loggedin_user_id(), $group->id ) );
 	}
 
 	/**
@@ -864,20 +1022,15 @@ class BP_REST_Groups_Endpoint extends WP_REST_Controller {
 	 * @return bool
 	 */
 	protected function can_see_hidden_groups( $request ) {
-		if ( $request['show_hidden'] ) {
-
-			if ( bp_current_user_can( 'bp_moderate' ) ) {
-				return true;
-			}
-
-			if ( is_user_logged_in() && isset( $request['user_id'] ) && absint( $request['user_id'] ) === bp_loggedin_user_id() ) {
-				return true;
-			}
-
-			return false;
+		if ( bp_current_user_can( 'bp_moderate' ) ) {
+			return true;
 		}
 
-		return true;
+		return (
+			is_user_logged_in()
+			&& isset( $request['user_id'] )
+			&& absint( $request['user_id'] ) === bp_loggedin_user_id()
+		);
 	}
 
 	/**
@@ -915,16 +1068,43 @@ class BP_REST_Groups_Endpoint extends WP_REST_Controller {
 	 * @return array Endpoint arguments.
 	 */
 	public function get_endpoint_args_for_item_schema( $method = WP_REST_Server::CREATABLE ) {
-		$args = WP_REST_Controller::get_endpoint_args_for_item_schema( $method );
+		$args = parent::get_endpoint_args_for_item_schema( $method );
 		$key  = 'get_item';
 
 		if ( WP_REST_Server::CREATABLE === $method || WP_REST_Server::EDITABLE === $method ) {
 			$key                         = 'create_item';
 			$args['description']['type'] = 'string';
 
+			// Add group types.
+			$args['types'] = array(
+				'description'       => __( 'Assign one or more type to a group. To assign more than one type, use a comma separated list of types.', 'buddypress' ),
+				'type'              => 'string',
+				'enum'              => bp_groups_get_group_types(),
+				'sanitize_callback' => 'bp_rest_sanitize_group_types',
+				'validate_callback' => 'bp_rest_validate_group_types',
+			);
+
 			if ( WP_REST_Server::EDITABLE === $method ) {
 				$key = 'update_item';
 				unset( $args['slug'] );
+
+				// Append group types.
+				$args['append_types'] = array(
+					'description'       => __( 'Append one or more type to a group. To append more than one type, use a comma separated list of types.', 'buddypress' ),
+					'type'              => 'string',
+					'enum'              => bp_groups_get_group_types(),
+					'sanitize_callback' => 'bp_rest_sanitize_group_types',
+					'validate_callback' => 'bp_rest_validate_group_types',
+				);
+
+				// Remove group types.
+				$args['remove_types'] = array(
+					'description'       => __( 'Remove one or more type of a group. To remove more than one type, use a comma separated list of types.', 'buddypress' ),
+					'type'              => 'string',
+					'enum'              => bp_groups_get_group_types(),
+					'sanitize_callback' => 'bp_rest_sanitize_group_types',
+					'validate_callback' => 'bp_rest_validate_group_types',
+				);
 			}
 		} elseif ( WP_REST_Server::DELETABLE === $method ) {
 			$key = 'delete_item';
@@ -949,158 +1129,178 @@ class BP_REST_Groups_Endpoint extends WP_REST_Controller {
 	 * @return array
 	 */
 	public function get_item_schema() {
-		$schema = array(
-			'$schema'    => 'http://json-schema.org/draft-04/schema#',
-			'title'      => 'bp_groups',
-			'type'       => 'object',
-			'properties' => array(
-				'id'                 => array(
-					'context'     => array( 'view', 'edit' ),
-					'description' => __( 'A unique numeric ID for the Group.', 'buddypress' ),
-					'readonly'    => true,
-					'type'        => 'integer',
-				),
-				'creator_id'         => array(
-					'context'     => array( 'view', 'edit' ),
-					'description' => __( 'The ID of the user who created the Group.', 'buddypress' ),
-					'type'        => 'integer',
-					'default'     => bp_loggedin_user_id(),
-				),
-				'name'               => array(
-					'context'     => array( 'view', 'edit' ),
-					'description' => __( 'The name of the Group.', 'buddypress' ),
-					'type'        => 'string',
-					'required'    => true,
-					'arg_options' => array(
-						'sanitize_callback' => 'sanitize_text_field',
+		if ( is_null( $this->schema ) ) {
+			$schema = array(
+				'$schema'    => 'http://json-schema.org/draft-04/schema#',
+				'title'      => 'bp_groups',
+				'type'       => 'object',
+				'properties' => array(
+					'id'                 => array(
+						'context'     => array( 'view', 'edit', 'embed' ),
+						'description' => __( 'A unique numeric ID for the Group.', 'buddypress' ),
+						'readonly'    => true,
+						'type'        => 'integer',
+					),
+					'creator_id'         => array(
+						'context'     => array( 'view', 'edit', 'embed' ),
+						'description' => __( 'The ID of the user who created the Group.', 'buddypress' ),
+						'type'        => 'integer',
+						'default'     => bp_loggedin_user_id(),
+					),
+					'name'               => array(
+						'context'     => array( 'view', 'edit', 'embed' ),
+						'description' => __( 'The name of the Group.', 'buddypress' ),
+						'type'        => 'string',
+						'required'    => true,
+						'arg_options' => array(
+							'sanitize_callback' => 'sanitize_text_field',
+						),
+					),
+					'slug'               => array(
+						'context'     => array( 'view', 'edit', 'embed' ),
+						'description' => __( 'The URL-friendly slug for the Group.', 'buddypress' ),
+						'type'        => 'string',
+						'arg_options' => array(
+							'sanitize_callback' => null, // Note: sanitization implemented in self::prepare_item_for_database().
+						),
+					),
+					'link'               => array(
+						'context'     => array( 'view', 'edit', 'embed' ),
+						'description' => __( 'The permalink to the Group on the site.', 'buddypress' ),
+						'type'        => 'string',
+						'format'      => 'uri',
+						'readonly'    => true,
+					),
+					'description'        => array(
+						'context'     => array( 'view', 'edit', 'embed' ),
+						'description' => __( 'The description of the Group.', 'buddypress' ),
+						'type'        => 'object',
+						'required'    => true,
+						'arg_options' => array(
+							'sanitize_callback' => null, // Note: sanitization implemented in self::prepare_item_for_database().
+							'validate_callback' => null, // Note: validation implemented in self::prepare_item_for_database().
+						),
+						'properties'  => array(
+							'raw'      => array(
+								'description' => __( 'Content for the description of the Group, as it exists in the database.', 'buddypress' ),
+								'type'        => 'string',
+								'context'     => array( 'view', 'edit', 'embed' ),
+							),
+							'rendered' => array(
+								'description' => __( 'HTML content for the description of the Group, transformed for display.', 'buddypress' ),
+								'type'        => 'string',
+								'context'     => array( 'view', 'edit', 'embed' ),
+								'readonly'    => true,
+							),
+						),
+					),
+					'status'             => array(
+						'context'     => array( 'view', 'edit', 'embed' ),
+						'description' => __( 'The status of the Group.', 'buddypress' ),
+						'type'        => 'string',
+						'enum'        => buddypress()->groups->valid_status,
+						'default'     => 'public',
+						'arg_options' => array(
+							'sanitize_callback' => 'sanitize_key',
+						),
+					),
+					'enable_forum'       => array(
+						'context'     => array( 'view', 'edit', 'embed' ),
+						'description' => __( 'Whether the Group has a forum enabled or not.', 'buddypress' ),
+						'type'        => 'boolean',
+					),
+					'parent_id'          => array(
+						'context'     => array( 'view', 'edit', 'embed' ),
+						'description' => __( 'ID of the parent Group.', 'buddypress' ),
+						'type'        => 'integer',
+					),
+					'date_created'       => array(
+						'context'     => array( 'view', 'edit', 'embed' ),
+						'description' => __( "The date the Group was created, in the site's timezone.", 'buddypress' ),
+						'readonly'    => true,
+						'type'        => 'string',
+						'format'      => 'date-time',
+					),
+					'types'              => array(
+						'context'     => array( 'view', 'edit', 'embed' ),
+						'description' => __( 'The type(s) of the Group.', 'buddypress' ),
+						'readonly'    => true,
+						'enum'        => bp_groups_get_group_types(),
+						'type'        => 'array',
+						'items'       => array(
+							'type' => 'string',
+						),
+					),
+					'admins'             => array(
+						'context'     => array( 'edit' ),
+						'description' => __( 'Group administrators.', 'buddypress' ),
+						'readonly'    => true,
+						'type'        => 'array',
+						'items'       => array(
+							'type' => 'object',
+						),
+					),
+					'mods'               => array(
+						'context'     => array( 'edit' ),
+						'description' => __( 'Group moderators.', 'buddypress' ),
+						'readonly'    => true,
+						'type'        => 'array',
+						'items'       => array(
+							'type' => 'object',
+						),
+					),
+					'total_member_count' => array(
+						'context'     => array( 'view', 'edit', 'embed' ),
+						'description' => __( 'Count of all Group members.', 'buddypress' ),
+						'readonly'    => true,
+						'type'        => 'integer',
+					),
+					'last_activity'      => array(
+						'context'     => array( 'view', 'edit', 'embed' ),
+						'description' => __( "The date the Group was last active, in the site's timezone.", 'buddypress' ),
+						'type'        => 'string',
+						'readonly'    => true,
+						'format'      => 'date-time',
+					),
+					'last_activity_diff'  => array(
+						'context'     => array( 'view', 'edit', 'embed' ),
+						'description' => __( "The human diff time the Group was last active, in the site's timezone.", 'buddypress' ),
+						'type'        => 'string',
+						'readonly'    => true,
 					),
 				),
-				'slug'               => array(
-					'context'     => array( 'view', 'edit' ),
-					'description' => __( 'The URL-friendly slug for the Group.', 'buddypress' ),
-					'type'        => 'string',
-					'arg_options' => array(
-						'sanitize_callback' => null, // Note: sanitization implemented in self::prepare_item_for_database().
-					),
-				),
-				'link'               => array(
-					'context'     => array( 'view', 'edit' ),
-					'description' => __( 'The permalink to the Group on the site.', 'buddypress' ),
+			);
+
+			if ( true !== bp_disable_group_avatar_uploads() ) {
+				$avatar_properties = array();
+
+				$avatar_properties['full'] = array(
+					/* translators: 1: Full avatar width in pixels. 2: Full avatar height in pixels */
+					'description' => sprintf( __( 'Avatar URL with full image size (%1$d x %2$d pixels).', 'buddypress' ), number_format_i18n( bp_core_avatar_full_width() ), number_format_i18n( bp_core_avatar_full_height() ) ),
 					'type'        => 'string',
 					'format'      => 'uri',
-					'readonly'    => true,
-				),
-				'description'        => array(
-					'context'     => array( 'view', 'edit' ),
-					'description' => __( 'The description of the Group.', 'buddypress' ),
+					'context'     => array( 'view', 'edit', 'embed' ),
+				);
+
+				$avatar_properties['thumb'] = array(
+					/* translators: 1: Thumb avatar width in pixels. 2: Thumb avatar height in pixels */
+					'description' => sprintf( __( 'Avatar URL with thumb image size (%1$d x %2$d pixels).', 'buddypress' ), number_format_i18n( bp_core_avatar_thumb_width() ), number_format_i18n( bp_core_avatar_thumb_height() ) ),
+					'type'        => 'string',
+					'format'      => 'uri',
+					'context'     => array( 'view', 'edit', 'embed' ),
+				);
+
+				$schema['properties']['avatar_urls'] = array(
+					'description' => __( 'Avatar URLs for the group.', 'buddypress' ),
 					'type'        => 'object',
-					'required'    => true,
-					'arg_options' => array(
-						'sanitize_callback' => null, // Note: sanitization implemented in self::prepare_item_for_database().
-						'validate_callback' => null, // Note: validation implemented in self::prepare_item_for_database().
-					),
-					'properties'  => array(
-						'raw'      => array(
-							'description' => __( 'Content for the description of the Group, as it exists in the database.', 'buddypress' ),
-							'type'        => 'string',
-							'context'     => array( 'view', 'edit' ),
-						),
-						'rendered' => array(
-							'description' => __( 'HTML content for the description of the Group, transformed for display.', 'buddypress' ),
-							'type'        => 'string',
-							'context'     => array( 'view', 'edit' ),
-							'readonly'    => true,
-						),
-					),
-				),
-				'status'             => array(
-					'context'     => array( 'view', 'edit' ),
-					'description' => __( 'The status of the Group.', 'buddypress' ),
-					'type'        => 'string',
-					'enum'        => buddypress()->groups->valid_status,
-					'default'     => 'public',
-					'arg_options' => array(
-						'sanitize_callback' => 'sanitize_key',
-					),
-				),
-				'enable_forum'       => array(
-					'context'     => array( 'view', 'edit' ),
-					'description' => __( 'Whether the Group has a forum enabled or not.', 'buddypress' ),
-					'type'        => 'boolean',
-				),
-				'parent_id'          => array(
-					'context'     => array( 'view', 'edit' ),
-					'description' => __( 'ID of the parent Group.', 'buddypress' ),
-					'type'        => 'integer',
-				),
-				'date_created'       => array(
-					'context'     => array( 'view', 'edit' ),
-					'description' => __( "The date the Group was created, in the site's timezone.", 'buddypress' ),
+					'context'     => array( 'view', 'edit', 'embed' ),
 					'readonly'    => true,
-					'type'        => 'string',
-					'format'      => 'date-time',
-				),
-				'admins'             => array(
-					'context'     => array( 'edit' ),
-					'description' => __( 'Group administrators.', 'buddypress' ),
-					'readonly'    => true,
-					'type'        => 'array',
-					'items'       => array(
-						'type' => 'object',
-					),
-				),
-				'mods'               => array(
-					'context'     => array( 'edit' ),
-					'description' => __( 'Group moderators.', 'buddypress' ),
-					'readonly'    => true,
-					'type'        => 'array',
-					'items'       => array(
-						'type' => 'object',
-					),
-				),
-				'total_member_count' => array(
-					'context'     => array( 'edit' ),
-					'description' => __( 'Count of all Group members.', 'buddypress' ),
-					'readonly'    => true,
-					'type'        => 'integer',
-				),
-				'last_activity'      => array(
-					'context'     => array( 'edit' ),
-					'description' => __( "The date the Group was last active, in the site's timezone.", 'buddypress' ),
-					'type'        => 'string',
-					'readonly'    => true,
-					'format'      => 'date-time',
-				),
-			),
-		);
+					'properties'  => $avatar_properties,
+				);
+			}
 
-		// Avatars.
-		if ( ! bp_disable_group_avatar_uploads() ) {
-			$avatar_properties = array();
-
-			$avatar_properties['full'] = array(
-				/* translators: Full image size for the group Avatar */
-				'description' => sprintf( __( 'Avatar URL with full image size (%1$d x %2$d pixels).', 'buddypress' ), number_format_i18n( bp_core_avatar_full_width() ), number_format_i18n( bp_core_avatar_full_height() ) ),
-				'type'        => 'string',
-				'format'      => 'uri',
-				'context'     => array( 'view', 'edit' ),
-			);
-
-			$avatar_properties['thumb'] = array(
-				/* translators: Thumb imaze size for the group Avatar */
-				'description' => sprintf( __( 'Avatar URL with thumb image size (%1$d x %2$d pixels).', 'buddypress' ), number_format_i18n( bp_core_avatar_thumb_width() ), number_format_i18n( bp_core_avatar_thumb_height() ) ),
-				'type'        => 'string',
-				'format'      => 'uri',
-				'context'     => array( 'view', 'edit' ),
-			);
-
-			$schema['properties']['avatar_urls'] = array(
-				'description' => __( 'Avatar URLs for the group.', 'buddypress' ),
-				'type'        => 'object',
-				'context'     => array( 'view', 'edit' ),
-				'readonly'    => true,
-				'properties'  => $avatar_properties,
-			);
+			// Cache current schema here.
+			$this->schema = $schema;
 		}
 
 		/**
@@ -1108,7 +1308,7 @@ class BP_REST_Groups_Endpoint extends WP_REST_Controller {
 		 *
 		 * @param array $schema The endpoint schema.
 		 */
-		return apply_filters( 'bp_rest_group_schema', $this->add_additional_fields_schema( $schema ) );
+		return apply_filters( 'bp_rest_group_schema', $this->add_additional_fields_schema( $this->schema ) );
 	}
 
 	/**
@@ -1224,6 +1424,14 @@ class BP_REST_Groups_Endpoint extends WP_REST_Controller {
 
 		$params['show_hidden'] = array(
 			'description'       => __( 'Whether results should include hidden Groups.', 'buddypress' ),
+			'default'           => false,
+			'type'              => 'boolean',
+			'sanitize_callback' => 'rest_sanitize_boolean',
+			'validate_callback' => 'rest_validate_request_arg',
+		);
+
+		$params['populate_extras'] = array(
+			'description'       => __( 'Whether to fetch extra BP data about the returned groups.', 'buddypress' ),
 			'default'           => false,
 			'type'              => 'boolean',
 			'sanitize_callback' => 'rest_sanitize_boolean',
